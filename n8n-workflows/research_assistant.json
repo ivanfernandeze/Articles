@@ -1,0 +1,206 @@
+{
+  "name": "Asistente de Investigación (n8n + Postgres)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "path": "research/search",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "Webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {"name": "topic", "value": "={{$json.topic || 'biodiversity'}}"},
+            {"name": "from", "value": "={{$json.from || $moment().subtract(($env.FLOW_DEFAULT_FROM_DAYS || 30), 'days').format('YYYY-MM-DD')}}"},
+            {"name": "to", "value": "={{$json.to || $moment().format('YYYY-MM-DD')}}"}
+          ]
+        }
+      },
+      "id": "SetRange",
+      "name": "Set Rango",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.crossref.org/works",
+        "options": {
+          "queryParameters": [
+            {"parameter": "query", "value": "={{$json.topic}}"},
+            {"parameter": "filter", "value": "=from-pub-date:{{$json.from}},until-pub-date:{{$json.to}},type:journal-article"},
+            {"parameter": "rows", "value": "=20"}
+          ]
+        }
+      },
+      "id": "Crossref",
+      "name": "Crossref",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [700, 200]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.semanticscholar.org/graph/v1/paper/search",
+        "options": {
+          "queryParameters": [
+            {"parameter": "query", "value": "={{$json.topic}}"},
+            {"parameter": "limit", "value": "=20"},
+            {"parameter": "fields", "value": "=title,abstract,authors,year,url,doi"}
+          ],
+          "headers": [
+            {"name": "x-api-key", "value": "={{$env.SEMANTIC_SCHOLAR_API_KEY}}"}
+          ]
+        }
+      },
+      "id": "SemanticScholar",
+      "name": "Semantic Scholar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {"mode": "combine"},
+      "id": "Merge",
+      "name": "Merge resultados",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const out = [];\n// Crossref\nif (items[0] && items[0].json && items[0].json.message && Array.isArray(items[0].json.message.items)) {\n  for (const it of items[0].json.message.items) {\n    out.push({\n      title: it.title && it.title[0] || '',\n      authors: (it.author || []).map(a => `${a.given || ''} ${a.family || ''}`).join(', '),\n      year: it['published-print']?.['date-parts']?.[0]?.[0] || it['published-online']?.['date-parts']?.[0]?.[0] || it.created?.['date-time']?.slice(0,4),\n      url: (it.URL || ''),\n      doi: it.DOI || '',\n      abstract: it.abstract ? it.abstract.replace(/<[^>]+>/g, '') : '',\n      source: 'Crossref'\n    });\n  }\n}\n// Semantic Scholar\nif (items[1] && items[1].json && Array.isArray(items[1].json.data)) {\n  for (const it of items[1].json.data) {\n    out.push({\n      title: it.title || '',\n      authors: (it.authors || []).map(a => a.name).join(', '),\n      year: it.year || null,\n      url: it.url || '',\n      doi: it.doi || '',\n      abstract: it.abstract || '',\n      source: 'Semantic Scholar'\n    });\n  }\n}\nreturn out.map(o => ({ json: o }));"
+      },
+      "id": "Normalize",
+      "name": "Normalizar artículos",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "Split",
+      "name": "Procesar uno a uno",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [1420, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://openrouter.ai/api/v1/chat/completions",
+        "jsonParameters": true,
+        "options": {
+          "headers": [
+            {"name": "Authorization", "value": "=Bearer {{$env.OPENROUTER_API_KEY}}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "jsonBody": "={{ { model: ($env.OPENROUTER_MODEL || 'deepseek-chat'), messages: [ { role: 'system', content: 'Eres un asistente de investigación automatizado especializado en búsqueda y análisis de literatura científica. Responde en formato: Relevante: [Sí/No]; Resumen: [texto breve]; Hallazgos clave: 1., 2., 3.' }, { role: 'user', content: `Evalúa el artículo con estos datos: Título: ${$json.title}; Autores: ${$json.authors}; Año: ${$json.year}; URL/DOI: ${$json.url || $json.doi}; Resumen: ${$json.abstract}.` } ] } }}"
+      },
+      "id": "AI",
+      "name": "Evaluación IA (OpenRouter)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extraer contenido del mensaje\nconst choice = $json.choices?.[0]?.message?.content || '';\n// Parseo simple\nconst rel = /Relevante:\\s*(Sí|No)/i.exec(choice)?.[1] || 'No';\nconst resumen = /Resumen:\\s*([^\\n]+)/i.exec(choice)?.[1] || '';\nconst f1 = /1\\.\\s*([^\\n]+)/.exec(choice)?.[1] || '';\nconst f2 = /2\\.\\s*([^\\n]+)/.exec(choice)?.[1] || '';\nconst f3 = /3\\.\\s*([^\\n]+)/.exec(choice)?.[1] || '';\nreturn [{ json: {\n  title: $item(0).$node[\"Normalizar artículos\"].json.title,\n  authors: $item(0).$node[\"Normalizar artículos\"].json.authors,\n  year: $item(0).$node[\"Normalizar artículos\"].json.year,\n  url: $item(0).$node[\"Normalizar artículos\"].json.url,\n  doi: $item(0).$node[\"Normalizar artículos\"].json.doi,\n  abstract: $item(0).$node[\"Normalizar artículos\"].json.abstract,\n  source: $item(0).$node[\"Normalizar artículos\"].json.source,\n  relevant: rel.toLowerCase() === 'sí',\n  summary: resumen,\n  findings: `1. ${f1}\n2. ${f2}\n3. ${f3}`\n}}];"
+      },
+      "id": "ParseAI",
+      "name": "Parsear evaluación",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1880, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {"value1": "={{$json.relevant}}"}
+          ],
+          "string": [
+            {"value1": "={{$json.summary}}", "operation": "contains", "value2": "=significant impact"}
+          ]
+        }
+      },
+      "id": "IFAlert",
+      "name": "¿Alerta?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2100, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.SLACK_WEBHOOK_URL}}",
+        "options": {
+          "json": true,
+          "bodyParameters": [
+            {"parameter": "text", "value": "=Nuevo artículo relevante: {{$json.title}}\n{{$json.url || $json.doi}}\nHallazgos:\n{{$json.findings}}"}
+          ]
+        }
+      },
+      "id": "Slack",
+      "name": "Notificar Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2300, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO articles(title, authors, year, url, doi, abstract, source, relevant, summary, findings) VALUES ('{{$json.title}}','{{$json.authors}}',{{ $json.year || 'NULL' }},'{{$json.url}}','{{$json.doi}}','{{$json.abstract}}','{{$json.source}}',{{ $json.relevant ? 'true' : 'false' }},'{{$json.summary}}','{{$json.findings}}') RETURNING id;"
+      },
+      "id": "Postgres",
+      "name": "Guardar en Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [2100, 400],
+      "credentials": {
+        "postgres": { "name": "Postgres-ENV" }
+      }
+    },
+    {
+      "parameters": {
+        "responseBody": "={{ { inserted: $json, message: 'Proceso completado' } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "Respond",
+      "name": "Responder",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2350, 400]
+    }
+  ],
+  "connections": {
+    "Webhook": {"main": [[{"node": "Set Rango", "type": "main", "index": 0}]]},
+    "Set Rango": {"main": [[{"node": "Crossref", "type": "main", "index": 0},{"node": "Semantic Scholar", "type": "main", "index": 0}]]},
+    "Crossref": {"main": [[{"node": "Merge resultados", "type": "main", "index": 0}]]},
+    "Semantic Scholar": {"main": [[{"node": "Merge resultados", "type": "main", "index": 1}]]},
+    "Merge resultados": {"main": [[{"node": "Normalizar artículos", "type": "main", "index": 0}]]},
+    "Normalizar artículos": {"main": [[{"node": "Procesar uno a uno", "type": "main", "index": 0}]]},
+    "Procesar uno a uno": {"main": [[{"node": "Evaluación IA (OpenRouter)", "type": "main", "index": 0}]]},
+    "Evaluación IA (OpenRouter)": {"main": [[{"node": "Parsear evaluación", "type": "main", "index": 0}]]},
+    "Parsear evaluación": {"main": [[{"node": "¿Alerta?", "type": "main", "index": 0},{"node": "Guardar en Postgres", "type": "main", "index": 0}]]},
+    "¿Alerta?": {"main": [[{"node": "Notificar Slack", "type": "main", "index": 0}], [ {"node": "Guardar en Postgres", "type": "main", "index": 0 } ]]},
+    "Guardar en Postgres": {"main": [[{"node": "Responder", "type": "main", "index": 0}]]}
+  },
+  "settings": {
+    "timezone": "UTC"
+  }
+}

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+
+# Virtual environments
+.venv/
+streamlit_app/.venv/
+
+# Env files
+.env
+
+# Editor/OS
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
+
+# Build/Cache
+*.cache/
+
+# Docs unpacked/binaries (optional)
+doc_unzipped/
+*.zip
+
+# Streamlit
+.streamlit/
